@@ -5597,7 +5597,6 @@ class GPUModelRunner(
 
             # Warmup Triton kernels before capturing CUDA graphs
             if capture_descs:
-                # Use the largest batch descriptor for Triton warmup
                 largest_desc = max(
                     (desc for mode, descs in capture_descs for desc in descs),
                     key=lambda d: d.num_tokens,
@@ -5606,6 +5605,7 @@ class GPUModelRunner(
                     self._dummy_run(
                         largest_desc.num_tokens,
                         cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                        # Ensure Triton attention kernels are executed
                         force_attention=True,
                         uniform_decode=largest_desc.uniform,
                         skip_eplb=True,
