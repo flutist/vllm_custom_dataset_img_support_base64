@@ -5595,6 +5595,26 @@ class GPUModelRunner(
             torch.accelerator.synchronize()
             torch.accelerator.empty_cache()
 
+            # Warmup Triton kernels before capturing CUDA graphs
+            if capture_descs:
+                # Use the largest batch descriptor for Triton warmup
+                largest_desc = max(
+                    (desc for mode, descs in capture_descs for desc in descs),
+                    key=lambda d: d.num_tokens,
+                )
+                for _ in range(2):
+                    self._dummy_run(
+                        largest_desc.num_tokens,
+                        cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                        force_attention=True,
+                        uniform_decode=largest_desc.uniform,
+                        skip_eplb=True,
+                        remove_lora=False,
+                        num_active_loras=largest_desc.num_active_loras,
+                    )
+                torch.accelerator.synchronize()
+                torch.accelerator.empty_cache()
+
             for mode, descs in capture_descs:
                 profile_descs = descs[:2]
                 mem_samples: list[int] = []
