@@ -1312,6 +1312,12 @@ class SpecDecodeBaseProposer:
             target_language_model = target_model
 
         self._maybe_share_embeddings(target_language_model)
+
+        # Validate MTP weights BEFORE sharing lm_head, to detect
+        # quantization calibration issues that cause 0% acceptance rates
+        if self.method == "mtp":
+            self._validate_mtp_weights(target_language_model)
+
         self._maybe_share_lm_head(target_language_model)
 
         if self.parallel_drafting and self.pass_hidden_states_to_model:
@@ -1323,6 +1329,109 @@ class SpecDecodeBaseProposer:
                 if self.eagle3_use_aux_hidden_state
                 else self.model.mask_hidden.view(self.hidden_size)
             )
+
+    def _validate_mtp_weights(self, target_language_model: nn.Module) -> bool:
+        """
+        Validate MTP weights for quantized models to detect quantization
+        calibration issues that cause 0% acceptance rates.
+
+        This method checks for:
+        - Missing shared_head in MTP layers
+        - NaN weights (quantization calibration failure)
+        - Inf weights (quantization overflow)
+        - Near-zero weights (possible quantization failure)
+
+        Returns True if validation passes, False otherwise.
+        """
+        if self.method != "mtp":
+            return True
+
+        try:
+            inner = getattr(self.model, "model", None)
+            if inner is None:
+                logger.warning(
+                    "MTP weight validation: Cannot access model.model, skipping"
+                )
+                return True
+
+            layers = getattr(inner, "layers", None)
+            if layers is None:
+                logger.warning(
+                    "MTP weight validation: Cannot access model.model.layers, skipping"
+                )
+                return True
+
+            items = layers.values() if isinstance(layers, nn.ModuleDict) else layers
+            total_layers = 0
+            valid_layers = 0
+
+            for layer in items:
+                sh = getattr(layer, "shared_head", None)
+                if sh is None:
+                    continue
+
+                total_layers += 1
+
+                head = getattr(sh, "head", None)
+                if head is None:
+                    continue
+
+                weight = getattr(head, "weight", None)
+                if weight is None:
+                    continue
+
+                # Check for NaN values
+                if torch.isnan(weight).any():
+                    logger.error(
+                        "MTP weight validation FAILED: MTP layer %d "
+                        "contains NaN weights - likely quantization calibration issue",
+                        total_layers - 1,
+                    )
+                    return False
+
+                # Check for Inf values
+                if torch.isinf(weight).any():
+                    logger.error(
+                        "MTP weight validation FAILED: MTP layer %d "
+                        "contains Inf weights - likely quantization overflow",
+                        total_layers - 1,
+                    )
+                    return False
+
+                # Check for near-zero weights (possible quantization failure)
+                mean_abs = weight.abs().float().mean().item()
+                if mean_abs < 1e-6:
+                    logger.warning(
+                        "MTP weight validation WARNING: MTP layer %d "
+                        "has near-zero weights (mean abs value: %.2e) - "
+                        "may indicate quantization failure",
+                        total_layers - 1,
+                        mean_abs,
+                    )
+
+                valid_layers += 1
+
+            if total_layers > 0 and valid_layers == 0:
+                logger.error(
+                    "MTP weight validation FAILED: Found %d MTP layers but none "
+                    "have valid head weights - checkpoint likely missing MTP "
+                    "quantization",
+                    total_layers,
+                )
+                return False
+
+            logger.info(
+                "MTP weight validation passed: Validated %d/%d MTP layers",
+                valid_layers,
+                total_layers,
+            )
+            return True
+
+        except Exception as e:
+            logger.warning(
+                "MTP weight validation failed with exception: %s, skipping", e
+            )
+            return True
 
     def _maybe_share_embeddings(self, target_language_model: nn.Module) -> None:
         """

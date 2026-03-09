@@ -434,7 +434,46 @@ class Qwen3_5MTP(nn.Module, SupportsMultiModal):
                 yield name, weight
 
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(remap_weight_names(weights))
+        loaded_params = loader.load_weights(remap_weight_names(weights))
+
+        # Validate that MTP layer weights were loaded
+        loaded_layers: set[int] = set()
+        for param_name in loaded_params:
+            # Check for model.layers.{idx}. pattern (MTP layers)
+            if ".layers." in param_name:
+                try:
+                    # Extract layer index from param name like
+                    # "model.layers.0.fc.weight"
+                    layer_prefix = param_name.split(".layers.")[1].split(".")[0]
+                    layer_idx = int(layer_prefix)
+                    if layer_idx >= self.model.mtp_start_layer_idx:
+                        loaded_layers.add(layer_idx)
+                except (IndexError, ValueError):
+                    pass
+
+        expected_mtp_layers = list(
+            range(
+                self.model.mtp_start_layer_idx,
+                self.model.mtp_start_layer_idx + self.model.num_mtp_layers,
+            )
+        )
+
+        missing_layers = [
+            idx for idx in expected_mtp_layers if idx not in loaded_layers
+        ]
+
+        if missing_layers and self.model.num_mtp_layers > 0:
+            logger.warning(
+                "MTP speculative decoding layer weights may be missing from "
+                "checkpoint: %s. This can cause 0%% acceptance rate with "
+                "quantized models. The checkpoint may have been quantized "
+                "without including the MTP layers, or the MTP head weights "
+                "were not properly calibrated. Use a checkpoint that includes "
+                "MTP layer weights, or disable speculative decoding.",
+                missing_layers,
+            )
+
+        return loaded_params
 
 
 class Qwen3_5MoeMTP(Qwen3_5MTP, QwenNextMixtureOfExperts):
